@@ -196,8 +196,26 @@ def build_ds(
 def ge(data, bigmodel):
     input_ids = data["input_ids"]
     num_layers = len(bigmodel.model.layers)
+    
+    # DEBUG: Print input shape
+    print(f"DEBUG - input_ids.shape: {input_ids.shape}")
+    print(f"DEBUG - input_ids.numel(): {input_ids.numel()}")
+    
     with torch.no_grad():
-        outs_big = bigmodel(input_ids.cuda(), output_hidden_states=True)
+        try:
+            outs_big = bigmodel(input_ids.cuda(), output_hidden_states=True)
+        except RuntimeError as e:
+            print(f"ERROR in bigmodel forward pass: {e}")
+            print(f"input_ids shape: {input_ids.shape}")
+            print(f"input_ids dtype: {input_ids.dtype}")
+            # Try with a shorter sequence
+            max_len = 1024
+            if input_ids.shape[1] > max_len:
+                print(f"Truncating sequence from {input_ids.shape[1]} to {max_len}")
+                input_ids = input_ids[:, :max_len]
+                outs_big = bigmodel(input_ids.cuda(), output_hidden_states=True)
+            else:
+                raise e
     feature_fusion = [
         outs_big.hidden_states[3],
         outs_big.hidden_states[num_layers // 2 + 1],
@@ -229,9 +247,16 @@ def online_data_generator(data_queue: mp.Queue,
     bigname = args.basepath
     bigtokenizer = AutoTokenizer.from_pretrained(bigname, use_fast=False)
     ds = build_ds(bigtokenizer, worker_id=worker_id)
-    bigmodel = AutoModelForCausalLM.from_pretrained(
-        bigname, device_map="auto", torch_dtype=torch.float16
-    )
+    try:
+        bigmodel = AutoModelForCausalLM.from_pretrained(
+            bigname, device_map="auto", torch_dtype=torch.float16
+        )
+    except Exception as e:
+        print(f"Failed to load model normally: {e}")
+        print("Trying with ignore_mismatched_sizes=True")
+        bigmodel = AutoModelForCausalLM.from_pretrained(
+            bigname, device_map="auto", torch_dtype=torch.float16, ignore_mismatched_sizes=True
+        )
     bigmodel.eval()
 
     print("loaded model and ready to generate")
@@ -342,7 +367,6 @@ class CustomDataset(Dataset):  #FLAG    FOR      Later
 
 
 def train(data_queue, tr_ids):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, tr_ids))
     data_num = args.data_num
     print(f"training on {args.data_num} examples total")
     train_frac = 1.0
@@ -463,7 +487,7 @@ def train(data_queue, tr_ids):
         )
 
     map_tok = np.load("t2d.npy")
-    map_tok = torch.from_numpy(map_tok).bool()
+    map_tok = torch.from_numpy(map_tok).bool().to(accelerator.device)
     head=head.to(torch.bfloat16)  #MOD - changed to bfloat 16 
     head = head.to(accelerator.device)
 
@@ -541,7 +565,7 @@ def train(data_queue, tr_ids):
                 correct += cc
             if accelerator.is_main_process and ct != 0:
                 logdict = {
-                    "train/lr": optimizer.optimizer.param_groups[0]["lr"],
+                    "train/lr": optimizer.param_groups[0]["lr"],
                     "train/loss": loss.item(),
                     "train/acc": cc / ct,
                 }
@@ -578,7 +602,10 @@ def main(
     train_gpus: Union[float, int, list[int]] = [2,3,4, 5, 6, 7],
 ):
 
-    if mp.current_process().name == "MainProcess":
+    # Initialize Accelerate
+    accelerator = Accelerator()
+    
+    if accelerator.is_main_process:
         print(f"training on {args.data_num} examples total")
         steps_per_epoch = ceil(args.data_num / (args.bs * max(1, args.gradient_accumulation_steps)))
 
