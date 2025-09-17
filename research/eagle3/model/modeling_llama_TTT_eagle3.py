@@ -43,7 +43,6 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.processing_utils import Unpack
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import (
-    LossKwargs,
     add_code_sample_docstrings,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -249,8 +248,11 @@ def eager_attention_forward_train(
     **kwargs,
 ):
     module.k_cache
+    
+
     key_states_orig = repeat_kv(key_cache[0], module.num_key_value_groups)
     value_states_orig = repeat_kv(value_cache[0], module.num_key_value_groups)
+
     attn_weights = torch.matmul(query, key_states_orig.transpose(2, 3)) * scaling
     attn_weights = torch.tril(attn_weights, diagonal=-1 * len(key_cache) + 1)
     start = time.time()
@@ -306,9 +308,13 @@ class LlamaAttention(nn.Module):
         self.head_dim = getattr(
             config, "head_dim", config.hidden_size // config.num_attention_heads
         )
+
+        self.config._attn_implementation='eager'
+
         self.num_key_value_groups = (
             config.num_attention_heads // config.num_key_value_heads
         )
+
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
@@ -387,6 +393,7 @@ class LlamaAttention(nn.Module):
             attention_interface: Callable = eager_attention_forward_train
         else:
             attention_interface: Callable = eager_attention_forward
+        
         if self.config._attn_implementation != "eager":
             if self.config._attn_implementation == "sdpa" and kwargs.get(
                 "output_attentions", False
@@ -395,7 +402,9 @@ class LlamaAttention(nn.Module):
                     "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
                     'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
                 )
+            
             else:
+
                 attention_interface = ALL_ATTENTION_FUNCTIONS[
                     self.config._attn_implementation
                 ]
@@ -624,6 +633,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        self.config._attn_implementation='eager'
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -902,7 +912,7 @@ class LlamaModel(LlamaPreTrainedModel):
         return causal_mask
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+class KwargsForCausalLM(FlashAttentionKwargs): ...
 
 
 class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):

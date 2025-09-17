@@ -421,6 +421,7 @@ def main():
 
                 hidden_states = model.module.fc(hidden_states.to(torch.bfloat16))
                 weight_sum = 0
+
                 for forward_idx in range(forward_num_total):
                     predict = model(
                         hidden_states, input_ids, attention_mask, hidden_states_history
