@@ -73,6 +73,9 @@ for i in range(num_p):
         command = f"python ge_data/llama{args.dataset}.py --start={start} --end={end} --index={index} --gpu_index {gpu_index_str} --outdir {outdir} --data_path {args.data_path} --model_path {args.model_path} --split {args.split}"  # noqa: E501
     elif args.chat_template == "qwen":
         command = f"python ge_data/qwen{args.dataset}.py --start={start} --end={end} --index={index} --gpu_index {gpu_index_str} --outdir {outdir} --data_path {args.data_path} --model_path {args.model_path} --split {args.split}"  # noqa: E501
+    elif args.chat_template == "gpt-oss":
+        command = f"python ge_data/gpt-oss{args.dataset}.py --start={start} --end={end} --index={index} --gpu_index {gpu_index_str} --outdir {outdir} --data_path {args.data_path} --model_path {args.model_path} --split {args.split}"  # noqa: E501
+
     else:
         raise NotImplementedError("Only llama and qwen chat templates are supported.")
 
