@@ -17,7 +17,7 @@ parser.add_argument("--gpu_index", type=int, nargs="+", default=[0])
 parser.add_argument("--outdir", type=str, default="outdir0")
 parser.add_argument("--data_path", type=str, default="0")
 parser.add_argument("--model_path", type=str, default="0")
-parser.add_argument("--split", type=str, default="0")
+parser.add_argument("--split", type=str, default="sft")
 parser.add_argument("--max_len", type=int, default=4096)
 args = parser.parse_args()
 
@@ -27,51 +27,39 @@ os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
 bigname = args.model_path
 
 
-
-
 def build_ds(
     tokenizer,
     split="train",
 ):
-    ds = load_dataset("json", data_files=args.data_path)
-    ds = ds[split]
-    ds = ds.shuffle(seed=42)
+    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split=f"{split}_{args.split}", token='')
     ds1 = ds.select(range(args.start, args.end))
-
-    original_columns1 = ds1.column_names
 
     def preprocess(examples):
         new_examples = {"conversation": [], "input_ids": [], "loss_mask": []}
-        for i in range(len(examples["id"])):
-            messages = []
-            roles = {"human": "user", "gpt": "assistant"}
-            source = examples["conversations"][i]
-            if roles[source[0]["from"]] != "user":
-                # Skip the first one if it is not from human
-                source = source[1:]
-            for _j, sentence in enumerate(source):
-                role = roles[sentence["from"]]
 
-                if sentence["from"] == "gpt":
-                    sentence["value"] = " " + sentence["value"]
-                messages.append({"role": role, "content": sentence["value"]})
+        for j in range(len(examples["messages"])):
+            messages = []
+            messages.extend(examples["messages"][j])
             conversation = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=False,
-                enable_thinking=False,
+                enable_thinking=False
             )
 
+            if not tokenizer.pad_token_id:
+                tokenizer.pad_token_id = tokenizer.unk_token_id
+
             input_ids = tokenizer(
-                text=conversation,
+                conversation,
                 return_tensors="pt",
                 add_special_tokens=False,
             ).input_ids[0]
+
             loss_mask = torch.zeros_like(input_ids)
 
-            # pattern = r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|end\|>"
-            # pattern = r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|(end|return)\|>"
             pattern = r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|(?:end|return)\|>"
+
 
             responses = re.findall(pattern, conversation, re.DOTALL)
 
@@ -92,16 +80,12 @@ def build_ds(
 
             new_examples["conversation"].append(conversation)
             new_examples["input_ids"].append(input_ids[None, :args.max_len])
+
             new_examples["loss_mask"].append(loss_mask[None, :args.max_len])
 
         return new_examples
 
-    ds1 = ds1.map(
-        preprocess,
-        batched=True,
-        remove_columns=original_columns1,
-        load_from_cache_file=False,
-    )
+    ds1 = ds1.map(preprocess, batched=True, load_from_cache_file=False)
 
     ds1.set_format(type="torch")
     return ds1
@@ -109,9 +93,8 @@ def build_ds(
 
 bigtokenizer = AutoTokenizer.from_pretrained(bigname, use_fast=False, token='')
 ds = build_ds(bigtokenizer)
-
 bigmodel = AutoModelForCausalLM.from_pretrained(
-    bigname, device_map="balanced", torch_dtype="auto",  token=''
+    bigname, device_map="auto", torch_dtype='auto', token=''
 )
 bigmodel.eval()
 
@@ -121,14 +104,13 @@ def ge(data):
     input_ids = data["input_ids"]
     num_layers = len(bigmodel.model.layers)
     outs_big = bigmodel(input_ids.cuda(), output_hidden_states=True)
-
     feature_fusion = [
         outs_big.hidden_states[3],
         outs_big.hidden_states[num_layers // 2 + 1],
         outs_big.hidden_states[-3],
     ]
-    target = outs_big.hidden_states[-1]
     hidden_state_big = torch.cat(feature_fusion, dim=-1)
+    target = outs_big.hidden_states[-1]
 
     return {
         "input_ids": input_ids.cpu()[0],
@@ -137,6 +119,10 @@ def ge(data):
         "target": target.cpu()[0],
     }
 
+
+outdir = f"{args.outdir}/{args.index}"
+if not os.path.exists(outdir):
+    os.makedirs(outdir)
 
 outdir = f"{args.outdir}/{args.index}"
 if not os.path.exists(outdir):
