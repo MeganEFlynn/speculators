@@ -18,6 +18,7 @@ parser.add_argument("--outdir", type=str, default="outdir0")
 parser.add_argument("--data_path", type=str, default="0")
 parser.add_argument("--model_path", type=str, default="0")
 parser.add_argument("--split", type=str, default="0")
+parser.add_argument("--max_len", type=int, default=4096)
 
 
 args = parser.parse_args()
@@ -74,7 +75,7 @@ def build_ds(
                 add_generation_prompt=False,
                 enable_thinking=False,
             )
-            print(conversation)
+
             input_ids = tokenizer(
                 text=conversation,
                 return_tensors="pt",
@@ -87,7 +88,7 @@ def build_ds(
             pattern = r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|(?:end|return)\|>"
 
             responses = re.findall(pattern, conversation, re.DOTALL)
-            print(responses)
+
             for response in responses:
                 search = tokenizer(
                     text=response,
@@ -102,11 +103,10 @@ def build_ds(
                     if input_ids.tolist()[i : i + n] == search.tolist()
                 ]
                 loss_mask[matches[0] : matches[0] + n] = 1
-            print(loss_mask)
-            
+
             new_examples["conversation"].append(conversation)
-            new_examples["input_ids"].append(input_ids[None, :])
-            new_examples["loss_mask"].append(loss_mask[None, :])
+            new_examples["input_ids"].append(input_ids[None, :args.max_len])
+            new_examples["loss_mask"].append(loss_mask[None, :args.max_len])
 
         return new_examples
 
@@ -121,11 +121,11 @@ def build_ds(
     return ds1
 
 
-bigtokenizer = AutoTokenizer.from_pretrained('openai/gpt-oss-20b', use_fast=False, )
+bigtokenizer = AutoTokenizer.from_pretrained(bigname, use_fast=False, token='')
 ds = build_ds(bigtokenizer)
 
 bigmodel = AutoModelForCausalLM.from_pretrained(
-    bigname, device_map="auto", torch_dtype="auto", 
+    bigname, device_map="balanced", torch_dtype="auto",  token=''
 )
 bigmodel.eval()
 
