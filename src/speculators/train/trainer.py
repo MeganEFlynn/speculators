@@ -1,3 +1,4 @@
+import math
 import json
 import logging
 import time
@@ -19,6 +20,7 @@ from tqdm.rich import tqdm
 from transformers import (
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
+    get_wsd_schedule,
 )
 
 from speculators.model import SpeculatorModel
@@ -153,11 +155,13 @@ class TrainerConfig(NamedTuple):
     muon_weight_decay: float = 0.1
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str = "match_rms_adamw"
-    scheduler_type: Literal["linear", "cosine", "none"] = "linear"
+    scheduler_type: Literal["linear", "cosine", "wsd", "none"] = "linear"
     scheduler_warmup_steps: int | None = None
     scheduler_warmup_ratio: float | None = None
     scheduler_total_steps: int | None = None
     scheduler_num_cosine_cycles: float = 0.5
+    scheduler_stable_fraction: float = 0.8
+    scheduler_min_lr_ratio: float = 0.1
     checkpoint_freq: float = 1
     save_best: bool = False
     hidden_states_dtype: torch.dtype = torch.bfloat16
@@ -420,6 +424,22 @@ class Trainer:
                     opt,
                     num_warmup_steps=scheduler_warmup_steps,
                     num_training_steps=scheduler_total_steps,
+                    last_epoch=last_epoch,
+                )
+            if self.config.scheduler_type == "wsd":
+                # Warmup W -> hold peak LR -> cosine decay to min_lr_ratio over
+                # the final (1 - stable_fraction) of total steps.
+                num_decay_steps = scheduler_total_steps - math.floor(
+                    self.config.scheduler_stable_fraction * scheduler_total_steps
+                )
+                return get_wsd_schedule(
+                    opt,
+                    num_warmup_steps=scheduler_warmup_steps,
+                    num_decay_steps=num_decay_steps,
+                    num_training_steps=scheduler_total_steps,
+                    warmup_type="linear",
+                    decay_type="cosine",
+                    min_lr_ratio=self.config.scheduler_min_lr_ratio,
                     last_epoch=last_epoch,
                 )
             return get_cosine_schedule_with_warmup(

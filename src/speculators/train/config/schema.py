@@ -373,7 +373,7 @@ class OptimizerArgs(_Group):
 
 
 class SchedulerArgs(_Group):
-    scheduler_type: Literal["linear", "cosine", "none"] = Field(
+    scheduler_type: Literal["linear", "cosine", "wsd", "none"] = Field(
         default="linear", description="LR scheduler type."
     )
     scheduler_warmup_steps: int | None = Field(
@@ -389,6 +389,15 @@ class SchedulerArgs(_Group):
     )
     scheduler_num_cosine_cycles: float = Field(
         default=0.5, description="Number of cosine cycles for the cosine scheduler."
+    )
+    scheduler_stable_fraction: float = Field(
+        default=0.8,
+        description="WSD only: fraction of total steps held at peak LR before the "
+        "cosine decay to min_lr_ratio begins.",
+    )
+    scheduler_min_lr_ratio: float = Field(
+        default=0.1,
+        description="WSD only: final LR as a fraction of the optimizer's base LR.",
     )
 
 
