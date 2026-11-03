@@ -41,8 +41,21 @@ once the loss lands.
 ## Status / next
 
 - [x] Download + verify data, pin provenance (this report)
-- [ ] §2: split by `primary_id` 99/1, pack to 4,096-token windows, report retained tokens
-- [ ] §2: WSD scheduler addition (`schema.py`, `cli.py`, `trainer.py`)
+- [ ] §2: split by `primary_id` 99/1, pack to 4,096-token windows, report retained tokens (in progress)
+- [x] §2: WSD scheduler addition (`schema.py`, `cli.py`, `trainer.py`) — commit `a437683`
+
+## §2a WSD scheduler — done (`a437683`)
+
+- `scheduler_type="wsd"` with `--scheduler-stable-fraction` (0.8) and
+  `--scheduler-min-lr-ratio` (0.1), built on `transformers.get_wsd_schedule`
+  (linear warmup, cosine decay), wired schema → CLI flags → `TrainerConfig` →
+  `make_scheduler`. `num_decay_steps = S − floor(0.8·S)` per the plan.
+- Verified numerically (S=1000, W=40): LR 6e-5 → 6e-4 by step 40, held through
+  step 799, cosine to 6e-5 at step 999. Warmup W will be
+  `min(1000, ceil(0.04·S))` resolved from actual S once the dataloader is final.
+- Resume: WSD `state_dict` roundtrips through the existing checkpointer load
+  path (which re-applies `get_last_lr()` to param groups); 9/9 existing
+  scheduler tests pass.
 - [ ] §3: `kl_div` body loss + candidate calibration KL (0.05 CE + 0.45 calib), penalty 0,
       B=8/K=8, γ=4, both chunked and unchunked paths
 - [ ] §4: teacher parity vs KL path
