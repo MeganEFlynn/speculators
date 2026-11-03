@@ -260,8 +260,10 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         rows = block_indices[r0:r1]
         target_indices = (rows - 1) % seq_len
         with torch.no_grad():
-            targets_c = self.verifier_lm_head(
-                self.verifier_norm(verifier_last_hidden_states[:, target_indices])
+            targets_c = self._apply_verifier_logit_softcap(
+                self.verifier_lm_head(
+                    self.verifier_norm(verifier_last_hidden_states[:, target_indices])
+                )
             )
         hidden_c = hidden[:, r0:r1]
         logits_c = self.lm_head(hidden_c)

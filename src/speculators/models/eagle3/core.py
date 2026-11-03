@@ -248,8 +248,10 @@ class Eagle3DraftModel(DraftVocabMixin, SpeculatorModel):
         return_loss = verifier_last_hidden_states is not None
         if return_loss:
             with torch.no_grad():
-                targets = self.verifier_lm_head(
-                    self.verifier_norm(verifier_last_hidden_states)
+                targets = self._apply_verifier_logit_softcap(
+                    self.verifier_lm_head(
+                        self.verifier_norm(verifier_last_hidden_states)
+                    )
                 )
                 # shape: [1, total_seq_len, draft_vocab_size]
             loss = torch.tensor(0.0, device=device)

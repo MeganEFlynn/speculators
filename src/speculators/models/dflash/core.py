@@ -448,12 +448,18 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                     if self.config.sample_from_anchor
                     else (anchored_block_indices - 1) % total_seq_len
                 )
-                targets = self.verifier_lm_head(
-                    self.verifier_norm(verifier_last_hidden_states[:, target_indices])
+                targets = self._apply_verifier_logit_softcap(
+                    self.verifier_lm_head(
+                        self.verifier_norm(
+                            verifier_last_hidden_states[:, target_indices]
+                        )
+                    )
                 )
             else:
-                verifier_logits = self.verifier_lm_head(
-                    self.verifier_norm(verifier_last_hidden_states)
+                verifier_logits = self._apply_verifier_logit_softcap(
+                    self.verifier_lm_head(
+                        self.verifier_norm(verifier_last_hidden_states)
+                    )
                 )
                 if not self.config.sample_from_anchor:
                     verifier_logits = torch.roll(verifier_logits, 1, dims=1)

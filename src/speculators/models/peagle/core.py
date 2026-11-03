@@ -188,8 +188,10 @@ class PEagleDraftModel(Eagle3DraftModel):
         )  # [1, total_sampled, vocab_size]
 
         with torch.no_grad():
-            targets = self.verifier_lm_head(
-                self.verifier_norm(verifier_last_hidden_states)
+            targets = self._apply_verifier_logit_softcap(
+                self.verifier_lm_head(
+                    self.verifier_norm(verifier_last_hidden_states)
+                )
             )
 
         targets = targets[:, orig_positions, :]  # [1, total_sampled, vocab_size]

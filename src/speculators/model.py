@@ -124,6 +124,28 @@ class DraftVocabMixin(nn.Module):
         """Load verifier-owned weights without replacing checkpoint values."""
         self._load_verifier_weights()
 
+    @staticmethod
+    def _resolve_verifier_logit_softcap(verifier_name_or_path: str) -> float | None:
+        """The verifier's ``final_logit_softcapping``, or None when unset.
+
+        Read from the effective (text) config so multimodal wrappers like
+        Gemma-4 resolve correctly.
+        """
+        from speculators.models.utils import get_verifier_config  # noqa: PLC0415
+
+        try:
+            cfg = get_verifier_config(verifier_name_or_path)
+        except (KeyError, OSError, ValueError):
+            return None
+        return getattr(cfg, "final_logit_softcapping", None)
+
+    def _apply_verifier_logit_softcap(self, logits: "torch.Tensor") -> "torch.Tensor":
+        """Apply the verifier's final logit softcap, if any (identity otherwise)."""
+        cap = getattr(self, "verifier_logit_softcap", None)
+        if cap is None:
+            return logits
+        return torch.tanh(logits.float() / cap) * cap
+
     def _load_verifier_weights(  # noqa: C901
         self,
         *,
@@ -151,6 +173,14 @@ class DraftVocabMixin(nn.Module):
         verifier_config = speculators_config.verifier
         if verifier_config.name_or_path is None:
             return
+
+        # Verifiers with final_logit_softcapping (e.g. Gemma) apply
+        # tanh(logits / cap) * cap after the lm_head. The reconstructed teacher
+        # targets must match, or they are systematically sharper than the
+        # verifier's true distribution.
+        self.verifier_logit_softcap = self._resolve_verifier_logit_softcap(
+            verifier_config.name_or_path
+        )
 
         # Determine which weights to load based on model attributes
         weights_to_load = ["embed_tokens.weight", "lm_head.weight"]
