@@ -56,9 +56,68 @@ once the loss lands.
 - Resume: WSD `state_dict` roundtrips through the existing checkpointer load
   path (which re-applies `get_last_lr()` to param groups); 9/9 existing
   scheduler tests pass.
-- [ ] §3: `kl_div` body loss + candidate calibration KL (0.05 CE + 0.45 calib), penalty 0,
-      B=8/K=8, γ=4, both chunked and unchunked paths
-- [ ] §4: teacher parity vs KL path
+- [x] §3: `kl_div` body loss + candidate calibration KL (0.05 CE + 0.45 calib), penalty 0 — `506d06e`
+- [x] §4: teacher parity vs KL path — verified (see §4 section)
 - [ ] §5: 50-update preflight (finite losses, calibration active, chunked==unchunked,
       save/reload FP32)
 - [ ] §6: two-epoch run + serving eval (7 spec tokens, T=1/top-p 0.95 and T=0) + selection
+
+## §3 Calibration KL — done (`506d06e`)
+
+- `lilicorr_w_calib` (default 0.0; old recipe 0.25/0.25 unchanged) adds
+  KL(teacher‖head) restricted to the draft's top-k candidates, teacher-forced
+  on observed predecessors (same supervised mask / reachable-prefix semantics
+  as the lattice CE). Gradients flow through the head's `log_p`; candidate ids
+  and teacher targets are detached. CLI flags:
+  `--lilicorr-w-ce/--lilicorr-w-pen/--lilicorr-w-calib/--lilicorr-target-source`.
+- Chunked and unchunked paths wired; new metric `lilicorr_calibration_sum`.
+- Verified: chunked == unchunked exactly (diff 0.000000 at fixed anchor seed).
+  An apparent 0.176 discrepancy between two unseeded calls was anchor
+  re-selection (`torch.randperm` in `select_anchors`) — pre-existing on base,
+  correct training behavior, not a chunking bug. Calibration math
+  unit-checked (positive with reachable prefix; ~1e-10 for matched
+  distributions). 8/8 lilicorr tests pass.
+
+## §4 Gemma teacher parity — done
+
+| Check | Result |
+|---|---|
+| Final-norm gain | `gemma4` correctly NOT in `GEMMA_STYLE_FINAL_NORM_MODEL_TYPES`; Gemma4RMSNorm is `x·w` (init ones), matches the `Qwen3RMSNorm` used for `verifier_norm`. eps 1e-6 matches. |
+| Unscaled head | `verifier_lm_head` is a plain `nn.Linear` — no `sqrt(5376)` embed-scale. |
+| Softcap once | Teacher: `tanh(logits/30)·30` via `_apply_verifier_logit_softcap` (`654ecf0`), applied in both the body-KL targets and candidate calibration (shared `targets_s`). Draft: no softcap in draft config; serving applies soft_cap only when the draft config sets it — none, matching training. |
+| Reconstruction | top-1 agreement 1.0000, TV 0.00156, mean |Δ| 0.0217 (bf16, pre-norm h). |
+| Alignment / masks | `(rows−1) % seq` gathers pre-norm verifier states; loss_mask from dataset (assistant-only); verified in softcap work. |
+
+Caveat documented: this transformers' `Gemma4TextModel` returns
+`hidden_states[-1]` POST final norm; training inputs are the vLLM-extracted
+PRE-norm layer-60 states, so parity is checked against a pre-norm capture
+(an initial tv≈0.999 was this double-norm artifact in a diagnostic script).
+
+## §2b Gradient accumulation — done (`8070a03`)
+
+- The trainer stepped once per packed window per rank — "global batch 64
+  windows" impossible at dp=6. Added `gradient_accumulation_steps` (schema →
+  CLI → `TrainerConfig`): loss scaled by 1/N; window = micro-batches
+  [(k−1)·N, k·N); zero-grad on window start; clip + opt/sched step +
+  global_step + logging on window end; partial windows flush at epoch end
+  and the max_steps cutoff.
+- Verified on a stub trainer: accum=4 over 4 micro-batches reproduces the
+  mean-of-4 gradient exactly (0.0 diff) in 1 optimizer step; 6 → 2 steps with
+  tail = sum/4; accum=1 = old behavior. dp=6 × accum 11 → 66 windows/update
+  (closest to 64).
+
+## §2 data prep — status
+
+- Group stats: 3,907,366,330 tokens (2,518,432,942 supervised); 13.16% of
+  rows ≥ 4096 tokens; after right-truncation 88.04% / 84.97% retained.
+- Group-shuffled file verified: 1,868,233 rows, group heads in seeded order
+  (seed 42, group order only); 99% boundary (row 1,849,550) lands exactly on
+  a group edge → group-disjoint split. Source composition drifts by file
+  position (tail deciles MetaMathQA-heavy), so the shuffle also balances the
+  val split.
+- `prepare-data` failures were infra: disk quota on the default HF cache
+  (fixed with local `HF_DATASETS_CACHE`) and the 4,096 cgroup PID ceiling
+  (pids.peak hit exactly 4096; pyarrow spawns ~78 threads/pool; stale test
+  processes consumed headroom). Fixed by killing stale processes, capping
+  pyarrow threads (`pa.set_cpu_count(8)`, `ARROW_IO_THREADS=4`), 2 workers.
+  Staging cleanly at ~2.9k rows/s.
