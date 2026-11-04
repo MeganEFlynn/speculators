@@ -102,6 +102,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         for call_kwargs in (train_kwargs, val_kwargs):
             call_kwargs["lilicorr_w_ce"] = kwargs.get("lilicorr_w_ce", 0.25)
             call_kwargs["lilicorr_w_pen"] = kwargs.get("lilicorr_w_pen", 0.25)
+            call_kwargs["lilicorr_w_calib"] = kwargs.get("lilicorr_w_calib", 0.0)
             # "input_ids" (default) uses the token actually observed at each
             # position, for both the lattice head and the DFlash backbone's CE
             # term, matching NVIDIA ModelOpt's reference implementation;
@@ -203,6 +204,19 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         gt_target_logit = cand_target_logits.gather(-1, gt_index.unsqueeze(-1))
         rejection = (gt_target_logit - cand_target_logits).clamp_min(0.0)
         pen_num = ((log_p.exp() * rejection).sum(-1) * supervised).sum()
+
+        # Candidate calibration KL (Nemotron Bolt transfer): the teacher's
+        # distribution restricted to the draft's top-k candidates against the
+        # head's conditional distribution over those candidates, conditioned on
+        # the observed predecessor (teacher-forced walk, same nodes as CE).
+        # Teacher logits restricted to K, renormalized; head distribution is
+        # log_p (already log-softmax over K). Gradients flow through log_p
+        # (draft hidden states and candidate log-probs); candidate ids and
+        # teacher targets are detached.
+        cand_teacher_logp = F.log_softmax(cand_target_logits, dim=-1)
+        calib = F.kl_div(log_p, cand_teacher_logp, reduction="none", log_target=True).sum(-1)
+        calib_num = (calib * supervised).sum()
+
         supervised_count = supervised.sum()
 
         with torch.no_grad():
@@ -229,7 +243,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
                     gt_in_lattice,
                 )
             ]
-        return ce_num, pen_num, supervised_count, *eal_counts
+        return ce_num, pen_num, calib_num, supervised_count, *eal_counts
 
     def _chunk_terms(
         self,
@@ -285,7 +299,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
             denominator=dflash_denominator,
             ce_target_ids=ce_target_ids,
         )
-        ce_num_c, pen_num_c, sup_count_c, eal, top1_eal, oracle_eal = (
+        ce_num_c, pen_num_c, calib_num_c, sup_count_c, eal, top1_eal, oracle_eal = (
             self._lattice_terms(
                 logits_c,
                 targets_c,
@@ -320,7 +334,15 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         # Raw numerators; the combiner divides by the pooled lattice denominator.
         metrics_c["lilicorr_ce_sum"] = ce_num_c.detach()
         metrics_c["lilicorr_penalty_sum"] = pen_num_c.detach()
-        return dflash_loss_c, ce_num_c, pen_num_c, sup_count_c.detach(), metrics_c
+        metrics_c["lilicorr_calibration_sum"] = calib_num_c.detach()
+        return (
+            dflash_loss_c,
+            ce_num_c,
+            pen_num_c,
+            calib_num_c,
+            sup_count_c.detach(),
+            metrics_c,
+        )
 
     # The chunk loop's recompute-inside-backward (custom autograd Functions,
     # Triton kernels, data-dependent Python) is not dynamo-traceable in any
@@ -341,6 +363,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         dpace_alpha: float,
         lilicorr_w_ce: float,
         lilicorr_w_pen: float,
+        lilicorr_w_calib: float,
         lilicorr_target_source: str,
         loss_chunk_anchors: int,
         **kwargs,
@@ -379,37 +402,43 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         dflash_denominator = (weight_mask.sum(dim=1) + _LOSS_REDUCTION_EPS).detach()
 
         dflash_loss = None
-        ce_num = pen_num = sup_count = None
+        ce_num = pen_num = calib_num = sup_count = None
         metrics: dict[str, torch.Tensor] = {}
         ones = torch.ones((), device=hidden.device)
         for b0 in range(0, max_anchors, loss_chunk_anchors):
             b1 = min(b0 + loss_chunk_anchors, max_anchors)
-            dflash_loss_c, ce_num_c, pen_num_c, sup_count_c, metrics_c = (
-                torch.utils.checkpoint.checkpoint(
-                    self._chunk_terms,
-                    hidden,
-                    verifier_last_hidden_states,
-                    hidden_states,
-                    document_ids,
-                    input_ids,
-                    aligned_loss_mask,
-                    block_indices,
-                    b0 * block,
-                    b1 * block,
-                    dflash_denominator,
-                    loss_config,
-                    gamma,
-                    per_position_loss_weight,
-                    dpace_alpha,
-                    lilicorr_target_source,
-                    use_reentrant=False,
-                )
+            (
+                dflash_loss_c,
+                ce_num_c,
+                pen_num_c,
+                calib_num_c,
+                sup_count_c,
+                metrics_c,
+            ) = torch.utils.checkpoint.checkpoint(
+                self._chunk_terms,
+                hidden,
+                verifier_last_hidden_states,
+                hidden_states,
+                document_ids,
+                input_ids,
+                aligned_loss_mask,
+                block_indices,
+                b0 * block,
+                b1 * block,
+                dflash_denominator,
+                loss_config,
+                gamma,
+                per_position_loss_weight,
+                dpace_alpha,
+                lilicorr_target_source,
+                use_reentrant=False,
             )
             dflash_loss = (
                 dflash_loss_c if dflash_loss is None else dflash_loss + dflash_loss_c
             )
             ce_num = ce_num_c if ce_num is None else ce_num + ce_num_c
             pen_num = pen_num_c if pen_num is None else pen_num + pen_num_c
+            calib_num = calib_num_c if calib_num is None else calib_num + calib_num_c
             sup_count = sup_count_c if sup_count is None else sup_count + sup_count_c
             for key, val in metrics_c.items():
                 if key in metrics:
@@ -422,10 +451,18 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         denom = sup_count.clamp_min(1.0)  # type: ignore[union-attr]
         ce_loss = ce_num / denom
         pen_loss = pen_num / denom
-        loss = dflash_loss + lilicorr_w_ce * ce_loss + lilicorr_w_pen * pen_loss
+        calib_loss = calib_num / denom
+        loss = (
+            dflash_loss
+            + lilicorr_w_ce * ce_loss
+            + lilicorr_w_pen * pen_loss
+            + lilicorr_w_calib * calib_loss
+        )
 
         metrics["lilicorr_ce_sum"] = ce_loss.detach()
         metrics["lilicorr_penalty_sum"] = pen_loss.detach()
+        metrics["lilicorr_calibration_sum"] = calib_loss.detach()
+
         metrics["loss_sum"] = loss.detach().clone()
         # Every accumulated "_sum" without a count-type "_total" is a pooled
         # scalar loss; give it the standard 1.0 marker denominator.
@@ -450,6 +487,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         dpace_alpha: float = 0.5,
         lilicorr_w_ce: float = 0.25,
         lilicorr_w_pen: float = 0.25,
+        lilicorr_w_calib: float = 0.0,
         lilicorr_target_source: str = "argmax",
         loss_chunk_anchors: int | None = None,
         **kwargs,
@@ -469,6 +507,7 @@ class LiLiCorrDraftModel(DFlashDraftModel):
                 dpace_alpha=dpace_alpha,
                 lilicorr_w_ce=lilicorr_w_ce,
                 lilicorr_w_pen=lilicorr_w_pen,
+                lilicorr_w_calib=lilicorr_w_calib,
                 lilicorr_target_source=lilicorr_target_source,
                 loss_chunk_anchors=loss_chunk_anchors,
                 **kwargs,
@@ -504,7 +543,15 @@ class LiLiCorrDraftModel(DFlashDraftModel):
             ce_target_ids=ce_target_ids,
         )
 
-        ce_num, pen_num, sup_count, eal, top1_eal, oracle_eal = self._lattice_terms(
+        (
+            ce_num,
+            pen_num,
+            calib_num,
+            sup_count,
+            eal,
+            top1_eal,
+            oracle_eal,
+        ) = self._lattice_terms(
             logits,
             targets,
             hidden,
@@ -518,8 +565,14 @@ class LiLiCorrDraftModel(DFlashDraftModel):
         denom = sup_count.clamp_min(1.0)
         ce_loss = ce_num / denom
         pen_loss = pen_num / denom
+        calib_loss = calib_num / denom
 
-        loss = dflash_loss + lilicorr_w_ce * ce_loss + lilicorr_w_pen * pen_loss
+        loss = (
+            dflash_loss
+            + lilicorr_w_ce * ce_loss
+            + lilicorr_w_pen * pen_loss
+            + lilicorr_w_calib * calib_loss
+        )
 
         with torch.no_grad():
             ones = torch.ones((), device=loss.device)
@@ -531,6 +584,8 @@ class LiLiCorrDraftModel(DFlashDraftModel):
             metrics["lilicorr_ce_total"] = ones.clone()
             metrics["lilicorr_penalty_sum"] = pen_loss.detach()
             metrics["lilicorr_penalty_total"] = ones.clone()
+            metrics["lilicorr_calibration_sum"] = calib_loss.detach()
+            metrics["lilicorr_calibration_total"] = ones.clone()
             metrics["lilicorr_eal_sum"], metrics["lilicorr_eal_total"] = eal
             metrics["lilicorr_top1_eal_sum"], metrics["lilicorr_top1_eal_total"] = (
                 top1_eal

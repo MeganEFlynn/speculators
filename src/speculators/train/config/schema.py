@@ -505,6 +505,31 @@ class DFlashArgs(_Group):
         "bounds them to one chunk at a time with exact loss/gradient parity. "
         "None (default) runs the monolithic path.",
     )
+    lilicorr_w_ce: float = Field(
+        default=0.25,
+        ge=0,
+        description="LiLiCorr only: weight on the lattice CE term (sampled-token CE "
+        "when lilicorr_target_source=input_ids).",
+    )
+    lilicorr_w_pen: float = Field(
+        default=0.25,
+        ge=0,
+        description="LiLiCorr only: weight on the distractor penalty term. 0 disables "
+ "the penalty.",
+    )
+    lilicorr_w_calib: float = Field(
+        default=0.0,
+        ge=0,
+        description="LiLiCorr only: weight on the candidate calibration KL term "
+        "(KL of the teacher restricted to the draft's top-k candidates against "
+        "the head's conditional distribution). Nemotron-style calibration.",
+    )
+    lilicorr_target_source: Literal["argmax", "input_ids"] = Field(
+        default="argmax",
+        description="LiLiCorr only: ground-truth token for the lattice head — the "
+        "verifier teacher's argmax ('argmax') or the observed token "
+        "('input_ids', ModelOpt reference behavior).",
+    )
 
 
 class DFlash2Args(_Group):
