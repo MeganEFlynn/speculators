@@ -41,7 +41,7 @@ once the loss lands.
 ## Status / next
 
 - [x] Download + verify data, pin provenance (this report)
-- [ ] §2: split by `primary_id` 99/1, pack to 4,096-token windows, report retained tokens (in progress)
+- [x] §2: group-shuffled dataset written (seed 42, group order only) — `prepare-data` passthrough running
 - [x] §2: WSD scheduler addition (`schema.py`, `cli.py`, `trainer.py`) — commit `a437683`
 
 ## §2a WSD scheduler — done (`a437683`)
