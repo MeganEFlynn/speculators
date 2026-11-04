@@ -181,7 +181,11 @@ grad-ckpt + sdpa. EXIT 0.
   68% of step time (fwd 487 ms, bwd 1.4 s per micro-batch). At S = 25,232 → ~13
   days for two epochs.
 
-**Chunked-vs-unchunked**: fixed-seed parity was verified at §3 time (diff 0.000000
-on synthetic batch). A re-verification on the trained checkpoint was attempted;
-first run had a test-harness shape bug (fed 6 aux layers into a 5-layer fc) — to
-be rerun with 5 aux + 1 final layout.
+**Chunked-vs-unchunked (trained checkpoint, real row)**: re-verified after fixing
+the harness (5 aux + 1 final layout). bf16: unchunked 5.419209 vs chunked
+5.439362 (diff 0.020, 0.37%) — both paths individually deterministic under
+reseed (A/A and B/B diff 0.000000); the gap is the dflash body term, isolated to
+bf16 matmul reduction-order over the 262k-vocab head when computed as one
+[1024, V] matmul vs two [512, V] chunk matmuls. **fp32: diff 0.000000** —
+confirming the paths are mathematically identical and the bf16 gap is pure
+reduction-order noise, not a logic bug. Training uses the chunked path.
