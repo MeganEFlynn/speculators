@@ -169,6 +169,7 @@ class TrainerConfig(NamedTuple):
     fsdp_shard: bool = False
     gradient_checkpointing: bool = False
     max_steps: int | None = None
+    gradient_accumulation_steps: int = 1
 
 
 def _resolve_scheduler_steps(
@@ -566,9 +567,31 @@ class Trainer:
                 )
 
             timer.mark("fwd")
-            self._optimizers_zero_grad()
-            loss.backward()
+            # Gradient accumulation: scale the micro-batch loss so the
+            # accumulated gradient equals the mean over an N-times-larger
+            # batch. The accumulation window is micro-batches
+            # [(k-1)*N, k*N): zero grads on the first micro-batch of each
+            # window, and step the optimizer after the last one (or on the
+            # final batch of the epoch, flushing any partial window).
+            accum = self.config.gradient_accumulation_steps
+            window_start = (local_step_rel - 1) % accum == 0
+            # Flush partial windows on the epoch's final executed batch and on
+            # the max_steps cutoff so no accumulated gradient is dropped.
+            executed_total = num_steps - skip_steps
+            window_end = (
+                local_step_rel % accum == 0
+                or local_step_rel == executed_total
+                or will_stop
+            )
+            if window_start:
+                self._optimizers_zero_grad()
+            (loss / accum).backward()
             timer.mark("pre_clip")
+            if not window_end:
+                # Mid-accumulation micro-batch: grads accumulate, no step.
+                timer.mark("bwd")
+                t_before_fetch = timer.now() or t_before_fetch
+                continue
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             metrics["error_records_sum"] = torch.tensor(
@@ -588,7 +611,7 @@ class Trainer:
             }
             self._schedulers_step()
             timer.mark("opt")
-            t_before_fetch = timer.now() or time.perf_counter()
+            t_before_fetch = timer.now() or t_before_fetch
 
             profile = None
             if timer.enabled:

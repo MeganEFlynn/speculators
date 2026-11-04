@@ -440,6 +440,14 @@ class TrainerArgs(_Group):
         description="Stop training after this many optimizer steps (counted across "
         "epochs). Useful for quick smoke runs. Default: run all epochs to completion.",
     )
+    gradient_accumulation_steps: int = Field(
+        default=1,
+        ge=1,
+        description="Number of micro-batches (per rank) accumulated before each "
+        "optimizer step. Losses are scaled by 1/N so the accumulated gradient "
+        "matches an N-times-larger batch. Scheduler, checkpointing and "
+        "global_step counting advance once per optimizer step.",
+    )
 
     @field_validator("checkpoint_freq")
     @classmethod
