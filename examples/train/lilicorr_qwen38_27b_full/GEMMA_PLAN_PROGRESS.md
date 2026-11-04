@@ -59,8 +59,8 @@ once the loss lands.
 - [x] §3: `kl_div` body loss + candidate calibration KL (0.05 CE + 0.45 calib), penalty 0 — `506d06e`
 - [x] §4: teacher parity vs KL path — verified (see §4 section)
 - [x] §2: prepare-data complete — see §2 data prep status below
-- [ ] §5: 50-update preflight (finite losses, calibration active, chunked==unchunked,
-      save/reload FP32)
+- [x] §5: 50-update preflight — done (see §5 section below)
+- [ ] §6: two-epoch run + serving eval + selection
 - [ ] §6: two-epoch run + serving eval (7 spec tokens, T=1/top-p 0.95 and T=0) + selection
 
 ## §3 Calibration KL — done (`506d06e`)
@@ -146,3 +146,42 @@ epochs. WSD: warmup min(1000, ⌈0.04·S⌉) = **1000 steps**, hold to 0.8·S =
 train_loader_len` (micro-batches) — with accum 11 the WSD decay would have run
 11× too slowly. `setup_optimizer` now divides the micro-batch count by the
 accumulation window (ceil) before resolving steps. 9/9 scheduler tests pass.
+
+
+## §5 preflight — done (2026-11-04)
+
+**Run**: `/tmp/ab4b/preflight` — 50 optimizer updates on real data, dp=6 (GPUs 2–7),
+accum 11, fresh 5-layer draft + LiLiCorr head, B=8/K=8, KL body + 0.05 CE + 0.45
+calibration, γ=4, 4,096-token windows, 512 anchors, chunk 64, AdamW 6e-4, WSD,
+grad-ckpt + sdpa. EXIT 0.
+
+- **Finite, falling losses**: train loss 138.8 (init) → 8.5 by step 49; final
+  `val/loss_epoch=8.854`, `val/dflash_loss=7.859`, `val/lilicorr_ce=1.999`,
+  `val/lilicorr_calibration=1.988` — calibration KL active throughout (~2.0).
+- **Checkpoint**: `epoch0_end` written with model (104 tensors, lilicorr head 46
+  params present), optimizer state (104 entries, all finite), scheduler state
+  (`last_epoch=50` — matches optimizer steps), training_state (`global_step=50`).
+  Reload via `SpeculatorModel.from_pretrained` verified.
+- **Known deviation**: AdamW `exp_avg`/`exp_avg_sq` are stored **bf16**, not the
+  plan's FP32 master/update state. Decision needed before §6 (cast to fp32 in the
+  checkpointer, or accept bf16 moments with BF16 model weights).
+- **Infra fixes required for 4,096-token data**:
+  - Render server restarted with `--max-model-len 4104`: 169,239 rows (9.4%) are
+    exactly 4,096 tokens; at 4,096 the 1-token render request exceeds the context
+    and vLLM rejects it (`max_tokens must be at least 1, got 0`), burning 4 retries
+    per row. New server config: `/tmp/ab4b/render4097/serve.sh` (GPUs 0–1, same
+    extract_hidden_states spec, aux ids `[4,16,28,40,52,60]`).
+  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` required: first launch OOM'd
+    at step 1 allocating the [5376, 262144] lm_head workspace (262k vocab × 4,096
+    window); with expandable segments 78–79 GB/GPU steady, zero OOMs over 50 steps.
+  - Render server launch MUST set `OPENBLAS/OMP/MKL_NUM_THREADS=1` — without them
+    OpenBLAS spawns 78 threads/proc and engine-core spawn dies at the 4,096 PID
+    cgroup ceiling.
+- **Throughput** (matters for §6 planning): ~45 s/optimizer update; render fetch is
+  68% of step time (fwd 487 ms, bwd 1.4 s per micro-batch). At S = 25,232 → ~13
+  days for two epochs.
+
+**Chunked-vs-unchunked**: fixed-seed parity was verified at §3 time (diff 0.000000
+on synthetic batch). A re-verification on the trained checkpoint was attempted;
+first run had a test-harness shape bug (fed 6 aux layers into a 5-layer fc) — to
+be rerun with 5 aux + 1 final layout.
