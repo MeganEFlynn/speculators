@@ -181,7 +181,9 @@ def _resolve_scheduler_steps(
     Explicit ``scheduler_warmup_steps`` wins; otherwise ``scheduler_warmup_ratio``
     (a fraction of total steps, validated to ``[0, 1]``) is used; otherwise the
     default of 1% of the resolved total steps. ``scheduler_total_steps`` defaults
-    to ``max_steps`` when set, else ``num_epochs * train_loader_len``.
+    to ``max_steps`` when set, else ``num_epochs * train_loader_len``. All step
+    counts are in OPTIMIZER steps (the caller divides micro-batch counts by the
+    gradient accumulation window).
     """
     default_total_steps = config.num_epochs * train_loader_len
     # max_steps bounds the training loop, so the LR schedule must decay over the
@@ -415,8 +417,15 @@ class Trainer:
             self.schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
             return
 
+        # The scheduler steps once per OPTIMIZER step, so its horizon must be in
+        # optimizer steps too: train_loader_len counts micro-batches, which the
+        # accumulation window divides into 1/accum as many optimizer steps.
+        num_micro_steps = len(self.train_loader)
+        accum = self.config.gradient_accumulation_steps
+        if accum > 1:
+            num_micro_steps = math.ceil(num_micro_steps / accum)
         scheduler_warmup_steps, scheduler_total_steps = _resolve_scheduler_steps(
-            self.config, len(self.train_loader)
+            self.config, num_micro_steps
         )
 
         def make_scheduler(opt: torch.optim.Optimizer):

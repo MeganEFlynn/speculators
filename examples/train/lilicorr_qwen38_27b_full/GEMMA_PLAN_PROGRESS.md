@@ -58,6 +58,7 @@ once the loss lands.
   scheduler tests pass.
 - [x] §3: `kl_div` body loss + candidate calibration KL (0.05 CE + 0.45 calib), penalty 0 — `506d06e`
 - [x] §4: teacher parity vs KL path — verified (see §4 section)
+- [x] §2: prepare-data complete — see §2 data prep status below
 - [ ] §5: 50-update preflight (finite losses, calibration active, chunked==unchunked,
       save/reload FP32)
 - [ ] §6: two-epoch run + serving eval (7 spec tokens, T=1/top-p 0.95 and T=0) + selection
@@ -121,3 +122,27 @@ PRE-norm layer-60 states, so parity is checked against a pre-norm capture
   processes consumed headroom). Fixed by killing stale processes, capping
   pyarrow threads (`pa.set_cpu_count(8)`, `ARROW_IO_THREADS=4`), 2 workers.
   Staging cleanly at ~2.9k rows/s.
+
+
+## §2 prepare-data — done
+
+`/tmp/ab4b/gemma_pb_v2_4096` (101 arrow shards, 77.4 GB): **1,791,560 rows** =
+1,868,233 input − 76,673 rows dropped for zero in-window supervised tokens.
+3,125,821,337 total tokens / 2,139,890,739 supervised (88.04% / 84.92% of the
+raw file, matching the earlier projection). seq_len 46–4096, mean 1744.75.
+Schema `input_ids/loss_mask/seq_len`; `load_from_disk` verified (the
+`dataset_info.json` split metadata is stale from an earlier write — arrow
+tables are the source of truth and load correctly).
+
+**Sampler / S computation** (real `MultipackDistributedBatchSamplerV2`,
+batch_max_length=4096, dp=6, seed 42, epoch 0, contiguous 99% train split of
+1,773,644 rows): **138,768 micro-batches per rank per epoch**, 90.72% bin
+fill. With accum 11 → 12,616 optimizer steps/epoch → **S = 25,232** for two
+epochs. WSD: warmup min(1000, ⌈0.04·S⌉) = **1000 steps**, hold to 0.8·S =
+20,185, cosine to 6e-5.
+
+**Scheduler horizon fix**: the scheduler steps once per optimizer step, but
+`_resolve_scheduler_steps` defaulted its horizon to `num_epochs ×
+train_loader_len` (micro-batches) — with accum 11 the WSD decay would have run
+11× too slowly. `setup_optimizer` now divides the micro-batch count by the
+accumulation window (ceil) before resolving steps. 9/9 scheduler tests pass.
